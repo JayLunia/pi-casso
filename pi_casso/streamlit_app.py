@@ -22,6 +22,37 @@ from pi_casso.vgg19_features import build_vgg19_features_until_conv, extract_con
 VGG_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1)
 VGG_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
 
+_TORCH_THREADS_STATE_KEY = "_pi_casso_torch_threads"
+
+
+def _configure_torch_threads(num_threads: int, interop_threads: int) -> None:
+    """Configure torch threads safely under Streamlit.
+
+    Streamlit re-runs the script; PyTorch disallows changing inter-op threads
+    after work has started. So we attempt configuration once per Streamlit
+    session and require restart for changes.
+    """
+    desired = (int(num_threads), int(interop_threads))
+    previous = st.session_state.get(_TORCH_THREADS_STATE_KEY)
+
+    if previous is None:
+        try:
+            torch.set_num_threads(desired[0])
+        except RuntimeError as e:
+            st.warning(f"Could not set torch threads ({e}).")
+        try:
+            torch.set_num_interop_threads(desired[1])
+        except RuntimeError as e:
+            st.warning(f"Could not set torch interop threads ({e}).")
+        st.session_state[_TORCH_THREADS_STATE_KEY] = desired
+        return
+
+    if previous != desired:
+        st.info(
+            "Torch thread settings can’t be changed after the app has started. "
+            "Restart Streamlit to apply new values."
+        )
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
@@ -187,8 +218,7 @@ def main() -> None:
         vgg_path = st.text_input("vgg weights path (.pth)", value=vgg_default)
         run_button = st.button("Run", type="primary")
 
-    torch.set_num_threads(int(num_threads))
-    torch.set_num_interop_threads(int(interop_threads))
+    _configure_torch_threads(int(num_threads), int(interop_threads))
     device = torch.device(device_str)
 
     col1, col2, col3 = st.columns(3)
