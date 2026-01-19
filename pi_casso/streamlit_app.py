@@ -98,6 +98,49 @@ def _load_content_bytes(file_bytes: bytes, imsize: int) -> Image.Image:
     img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
     return img.resize((imsize, imsize), resample=Image.BICUBIC)
 
+def _parse_int_list(s: str) -> List[int]:
+    s = s.strip()
+    if not s:
+        return []
+    out: List[int] = []
+    for part in s.split(","):
+        part = part.strip()
+        if part:
+            out.append(int(part))
+    return out
+
+
+def _parse_float_list(s: str) -> List[float]:
+    s = s.strip()
+    if not s:
+        return []
+    out: List[float] = []
+    for part in s.split(","):
+        part = part.strip()
+        if part:
+            out.append(float(part))
+    return out
+
+
+def _expand_int(values: List[int], n: int, default: int) -> List[int]:
+    if not values:
+        return [int(default)] * n
+    if len(values) == 1:
+        return [int(values[0])] * n
+    if len(values) != n:
+        raise ValueError(f"Expected {n} values but got {len(values)}")
+    return [int(v) for v in values]
+
+
+def _expand_float(values: List[float], n: int, default: float) -> List[float]:
+    if not values:
+        return [float(default)] * n
+    if len(values) == 1:
+        return [float(values[0])] * n
+    if len(values) != n:
+        raise ValueError(f"Expected {n} values but got {len(values)}")
+    return [float(v) for v in values]
+
 
 def _pil_to_tensor(img: Image.Image, device: torch.device) -> torch.Tensor:
     try:
@@ -200,9 +243,28 @@ def main() -> None:
     with st.sidebar:
         st.header("Runtime")
         device_str = st.selectbox("Device", options=["cpu"], index=0)
-        imsize = st.slider("Image size", min_value=64, max_value=512, value=256, step=64)
-        steps = st.slider("Steps (Adam)", min_value=10, max_value=600, value=200, step=10)
-        lr = st.number_input("Learning rate", min_value=1e-4, max_value=0.5, value=0.03, step=0.01, format="%.4f")
+        preset = st.selectbox("Quality preset", options=["Fast (Pi)", "Balanced", "High", "Custom"], index=1)
+        if preset == "Fast (Pi)":
+            imsize_default, steps_default, lr_default = 192, 120, 0.04
+            pyramid_default, steps_stage_default, lr_stage_default = "128,192", "60,60", "0.05,0.03"
+        elif preset == "Balanced":
+            imsize_default, steps_default, lr_default = 256, 160, 0.03
+            pyramid_default, steps_stage_default, lr_stage_default = "128,256", "80,30", "0.04,0.02"
+        elif preset == "High":
+            imsize_default, steps_default, lr_default = 256, 250, 0.03
+            pyramid_default, steps_stage_default, lr_stage_default = "", "", ""
+        else:
+            imsize_default, steps_default, lr_default = 256, 200, 0.03
+            pyramid_default, steps_stage_default, lr_stage_default = "", "", ""
+
+        imsize = st.slider("Image size", min_value=64, max_value=512, value=int(imsize_default), step=64)
+        steps = st.slider("Steps (Adam)", min_value=10, max_value=600, value=int(steps_default), step=10)
+        lr = st.number_input("Learning rate", min_value=1e-4, max_value=0.5, value=float(lr_default), step=0.01, format="%.4f")
+        st.caption("Optional multi-scale (often better quality/faster on Pi). Leave blank to disable.")
+        pyramid = st.text_input("Pyramid sizes (e.g. 128,256)", value=pyramid_default)
+        steps_per_stage = st.text_input("Steps per stage (e.g. 80,30)", value=steps_stage_default)
+        lr_per_stage = st.text_input("LR per stage (e.g. 0.04,0.02)", value=lr_stage_default)
+
         style_weight = st.number_input("Style weight", min_value=1.0, value=100000.0, step=1000.0, format="%.0f")
         content_weight = st.number_input("Content weight", min_value=0.0, value=1.0, step=0.1, format="%.3f")
         tv_weight = st.number_input("TV weight (optional)", min_value=0.0, value=0.0, step=0.001, format="%.4f")
@@ -274,39 +336,62 @@ def main() -> None:
         return
 
     with st.spinner("Loading images…"):
-        content_pil = _load_content_bytes(content_bytes, imsize=imsize)
-        style_pil = Image.open(style_path).convert("RGB").resize((imsize, imsize), resample=Image.BICUBIC)
-        content = _pil_to_tensor(content_pil, device=device)
-        style = _pil_to_tensor(style_pil, device=device)
+        original_content = Image.open(io.BytesIO(content_bytes)).convert("RGB")
+        original_style = Image.open(style_path).convert("RGB")
 
-    if channels_last and device.type == "cpu":
-        content = content.contiguous(memory_format=torch.channels_last)
-        style = style.contiguous(memory_format=torch.channels_last)
+    try:
+        pyramid_sizes = _parse_int_list(pyramid) if pyramid.strip() else [int(imsize)]
+        pyramid_sizes = [s for s in pyramid_sizes if s > 0] or [int(imsize)]
+        stage_steps = _expand_int(_parse_int_list(steps_per_stage), len(pyramid_sizes), int(steps))
+        stage_lrs = _expand_float(_parse_float_list(lr_per_stage), len(pyramid_sizes), float(lr))
+    except Exception as e:
+        st.error(f"Invalid pyramid/stage settings: {e}")
+        return
 
     with st.spinner("Loading VGG slice…"):
         vgg = _load_vgg(vgg_path, max_conv=5, device_str=device_str, channels_last=channels_last)
 
-    with st.spinner("Preparing targets…"):
-        content_target, style_targets = _compute_targets(vgg, content, style, content_conv=4, style_convs=[1, 2, 3, 4, 5])
+    prev_out: Optional[torch.Tensor] = None
+    metrics: Dict[str, float] = {}
+    with st.spinner("Optimizing…"):
+        for stage_idx, size in enumerate(pyramid_sizes, start=1):
+            st.info(f"Stage {stage_idx}/{len(pyramid_sizes)}: {size}px  steps={stage_steps[stage_idx-1]}  lr={stage_lrs[stage_idx-1]}")
+            content_pil = original_content.resize((size, size), resample=Image.BICUBIC)
+            style_pil = original_style.resize((size, size), resample=Image.BICUBIC)
+            content = _pil_to_tensor(content_pil, device=device)
+            style = _pil_to_tensor(style_pil, device=device)
+            if channels_last and device.type == "cpu":
+                content = content.contiguous(memory_format=torch.channels_last)
+                style = style.contiguous(memory_format=torch.channels_last)
 
-    init_img = torch.rand_like(content) if init_mode == "noise" else content.clone()
-    if channels_last and device.type == "cpu":
-        init_img = init_img.contiguous(memory_format=torch.channels_last)
+            content_target, style_targets = _compute_targets(
+                vgg, content, style, content_conv=4, style_convs=[1, 2, 3, 4, 5]
+            )
 
-    out, metrics = _run_adam(
-        vgg=vgg,
-        content_target=content_target,
-        style_targets=style_targets,
-        init_img=init_img,
-        content_conv=4,
-        style_convs=[1, 2, 3, 4, 5],
-        steps=int(steps),
-        lr=float(lr),
-        style_weight=float(style_weight),
-        content_weight=float(content_weight),
-        tv_weight=float(tv_weight),
-        preview_every=int(preview_every),
-    )
+            if prev_out is None:
+                init_img = torch.rand_like(content) if init_mode == "noise" else content.clone()
+            else:
+                init_img = F.interpolate(prev_out, size=(size, size), mode="bilinear", align_corners=False)
+            if channels_last and device.type == "cpu":
+                init_img = init_img.contiguous(memory_format=torch.channels_last)
+
+            prev_out, metrics = _run_adam(
+                vgg=vgg,
+                content_target=content_target,
+                style_targets=style_targets,
+                init_img=init_img,
+                content_conv=4,
+                style_convs=[1, 2, 3, 4, 5],
+                steps=int(stage_steps[stage_idx - 1]),
+                lr=float(stage_lrs[stage_idx - 1]),
+                style_weight=float(style_weight),
+                content_weight=float(content_weight),
+                tv_weight=float(tv_weight),
+                preview_every=int(preview_every),
+            )
+
+    assert prev_out is not None
+    out = prev_out
 
     out_img = _tensor_to_pil(out)
     out_placeholder.image(out_img, caption="Final output", use_container_width=True)

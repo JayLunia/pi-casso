@@ -80,7 +80,7 @@ python3 -m pi_casso.run_opt \
 
 Quality/speed tips:
 - Big speedups: lower `--imsize` to `128` or `192`
-- Better quality for similar time: use multi-scale, e.g. `--pyramid 128,256`
+- Better quality for similar time: use multi-scale, e.g. `--pyramid 128,256 --steps-per-stage 80,30 --lr-per-stage 0.04,0.02`
 - If results look noisy: try `--init content` (default) and lower `--lr` (e.g. `0.02`)
 
 ## Run (Streamlit UI)
@@ -101,6 +101,7 @@ The UI:
 - captures content via `camera_input` (or file upload fallback)
 - lets you pick a style from `styles/`
 - runs NST and shows previews + final image + download button
+- includes a “Quality preset” and optional multi-scale pyramid controls to reduce runtime on Pi
 
 ## Troubleshooting
 
@@ -116,4 +117,3 @@ This project is prepared as a local git repo. To push to a private GitHub reposi
 git remote add origin git@github.com:<your-user-or-org>/pi-casso.git
 git push -u origin main
 ```
-

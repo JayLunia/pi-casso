@@ -31,6 +31,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--imsize", type=int, default=256, help="Resize H=W (lower is faster).")
     p.add_argument("--pyramid", type=str, default="", help="Optional sizes like '128,256' for multi-scale.")
+    p.add_argument(
+        "--steps-per-stage",
+        type=str,
+        default="",
+        help="Optional steps per pyramid stage, e.g. '80,30' for pyramid '128,256'. Defaults to --steps.",
+    )
+    p.add_argument(
+        "--lr-per-stage",
+        type=str,
+        default="",
+        help="Optional learning rate per stage, e.g. '0.04,0.02'. Defaults to --lr.",
+    )
 
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--num-threads", type=int, default=4)
@@ -72,6 +84,37 @@ def _parse_pyramid(arg: str, fallback: int) -> List[int]:
     sizes = [int(s) for s in arg.split(",") if s.strip()]
     sizes = [s for s in sizes if s > 0]
     return sizes or [int(fallback)]
+
+def _parse_float_list(s: str) -> List[float]:
+    s = s.strip()
+    if not s:
+        return []
+    out: List[float] = []
+    for part in s.split(","):
+        part = part.strip()
+        if part:
+            out.append(float(part))
+    return out
+
+
+def _expand_per_stage_int(values: List[int], n: int, default: int) -> List[int]:
+    if not values:
+        return [int(default)] * n
+    if len(values) == 1:
+        return [int(values[0])] * n
+    if len(values) != n:
+        raise SystemExit(f"Expected {n} values but got {len(values)}")
+    return [int(v) for v in values]
+
+
+def _expand_per_stage_float(values: List[float], n: int, default: float) -> List[float]:
+    if not values:
+        return [float(default)] * n
+    if len(values) == 1:
+        return [float(values[0])] * n
+    if len(values) != n:
+        raise SystemExit(f"Expected {n} values but got {len(values)}")
+    return [float(v) for v in values]
 
 
 def _vgg_normalize(x: torch.Tensor) -> torch.Tensor:
@@ -212,11 +255,16 @@ def main() -> None:
     vgg = _build_vgg(args.vgg_weights, max_conv=max_conv, device=device, channels_last=bool(args.channels_last))
 
     pyramid = _parse_pyramid(args.pyramid, args.imsize)
+    steps_per_stage = _expand_per_stage_int(_parse_int_list(args.steps_per_stage), len(pyramid), int(args.steps))
+    lr_per_stage = _expand_per_stage_float(_parse_float_list(args.lr_per_stage), len(pyramid), float(args.lr))
+
     prev_out: Optional[torch.Tensor] = None
     total_t0 = time.time()
 
     for stage_idx, size in enumerate(pyramid, start=1):
-        print(f"[stage {stage_idx}/{len(pyramid)}] imsize={size}")
+        stage_steps = int(steps_per_stage[stage_idx - 1])
+        stage_lr = float(lr_per_stage[stage_idx - 1])
+        print(f"[stage {stage_idx}/{len(pyramid)}] imsize={size} steps={stage_steps} lr={stage_lr}")
         content_img = _load_image(args.content, size, device=device)
         style_img = _load_image(args.style, size, device=device)
 
@@ -247,8 +295,8 @@ def main() -> None:
             init_img=init_img,
             content_conv=content_conv,
             style_convs=style_convs,
-            steps=int(args.steps),
-            lr=float(args.lr),
+            steps=stage_steps,
+            lr=stage_lr,
             style_weight=float(args.style_weight),
             content_weight=float(args.content_weight),
             tv_weight=float(args.tv_weight),
@@ -266,4 +314,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
