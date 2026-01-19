@@ -248,7 +248,9 @@ def main() -> None:
     content_conv = 4
     style_convs = [1, 2, 3, 4, 5]
     pyramid_sizes = [128, 256]
-    stage_steps = [80, 30]
+    # Target: 512 final resolution with 200 total steps (256->512 pyramid).
+    pyramid_sizes = [256, 512]
+    stage_steps = [150, 50]
     stage_lrs = [0.04, 0.02]
     style_weight = 100000.0
     content_weight = 1.0

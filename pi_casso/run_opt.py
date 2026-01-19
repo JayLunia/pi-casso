@@ -206,8 +206,9 @@ def main() -> None:
     style_convs = [1, 2, 3, 4, 5]
 
     # Fast-ish defaults with good quality on Pi
-    pyramid = [128, 256]
-    steps_per_stage = [80, 30]
+    # Target: 512 final resolution with 200 total steps (256->512 pyramid).
+    pyramid = [256, 512]
+    steps_per_stage = [150, 50]
     lr_per_stage = [0.04, 0.02]
     style_weight = 100000.0
     content_weight = 1.0
