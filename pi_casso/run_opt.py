@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -20,49 +21,14 @@ VGG_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1,
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
-            "Optimization-based Neural Style Transfer (no training), tuned for Raspberry Pi. "
-            "Uses a truncated VGG19.features slice to reduce RAM."
+            "Pi-casso: optimization-based Neural Style Transfer (no training).\n"
+            "CLI is intentionally minimal: only content/style/out.\n"
+            "Make sure `vgg19_conv1_to_conv5.pth` exists in the repo root (or set PI_CASSO_VGG_WEIGHTS)."
         )
     )
-    p.add_argument("--vgg-weights", type=str, required=True, help="Path to exported VGG19 slice weights (.pth).")
-    p.add_argument("--content", type=str, required=True)
-    p.add_argument("--style", type=str, required=True, help="Path to a style image (single style).")
-    p.add_argument("--out", type=str, required=True)
-
-    p.add_argument("--imsize", type=int, default=256, help="Resize H=W (lower is faster).")
-    p.add_argument("--pyramid", type=str, default="", help="Optional sizes like '128,256' for multi-scale.")
-    p.add_argument(
-        "--steps-per-stage",
-        type=str,
-        default="",
-        help="Optional steps per pyramid stage, e.g. '80,30' for pyramid '128,256'. Defaults to --steps.",
-    )
-    p.add_argument(
-        "--lr-per-stage",
-        type=str,
-        default="",
-        help="Optional learning rate per stage, e.g. '0.04,0.02'. Defaults to --lr.",
-    )
-
-    p.add_argument("--device", type=str, default="cpu")
-    p.add_argument("--num-threads", type=int, default=4)
-    p.add_argument("--interop-threads", type=int, default=1)
-    p.add_argument("--channels-last", action="store_true")
-
-    p.add_argument("--content-conv", type=int, default=4)
-    p.add_argument("--style-convs", type=str, default="1,2,3,4,5")
-    p.add_argument("--max-conv", type=int, default=5)
-
-    p.add_argument("--steps", type=int, default=200)
-    p.add_argument("--lr", type=float, default=0.03)
-    p.add_argument("--style-weight", type=float, default=100000.0)
-    p.add_argument("--content-weight", type=float, default=1.0)
-    p.add_argument("--tv-weight", type=float, default=0.0)
-    p.add_argument("--init", type=str, default="content", choices=["content", "noise"])
-
-    p.add_argument("--print-every", type=int, default=25)
-    p.add_argument("--save-every", type=int, default=0)
-    p.add_argument("--run-dir", type=str, default=None, help="Optional folder for intermediates.")
+    p.add_argument("--content", type=str, required=True, help="Path to content image.")
+    p.add_argument("--style", type=str, required=True, help="Path to style image (single style).")
+    p.add_argument("--out", type=str, required=True, help="Output image path.")
     return p
 
 
@@ -85,36 +51,27 @@ def _parse_pyramid(arg: str, fallback: int) -> List[int]:
     sizes = [s for s in sizes if s > 0]
     return sizes or [int(fallback)]
 
-def _parse_float_list(s: str) -> List[float]:
-    s = s.strip()
-    if not s:
-        return []
-    out: List[float] = []
-    for part in s.split(","):
-        part = part.strip()
-        if part:
-            out.append(float(part))
-    return out
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
 
 
-def _expand_per_stage_int(values: List[int], n: int, default: int) -> List[int]:
-    if not values:
-        return [int(default)] * n
-    if len(values) == 1:
-        return [int(values[0])] * n
-    if len(values) != n:
-        raise SystemExit(f"Expected {n} values but got {len(values)}")
-    return [int(v) for v in values]
-
-
-def _expand_per_stage_float(values: List[float], n: int, default: float) -> List[float]:
-    if not values:
-        return [float(default)] * n
-    if len(values) == 1:
-        return [float(values[0])] * n
-    if len(values) != n:
-        raise SystemExit(f"Expected {n} values but got {len(values)}")
-    return [float(v) for v in values]
+def _find_vgg_weights() -> Path:
+    env = os.environ.get("PI_CASSO_VGG_WEIGHTS")
+    if env:
+        p = Path(env).expanduser()
+        if p.exists():
+            return p
+    candidates = [
+        _repo_root() / "vgg19_conv1_to_conv5.pth",
+        Path.cwd() / "vgg19_conv1_to_conv5.pth",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    raise FileNotFoundError(
+        "Missing VGG weights file. Place `vgg19_conv1_to_conv5.pth` in the repo root "
+        "or set env var `PI_CASSO_VGG_WEIGHTS`."
+    )
 
 
 def _vgg_normalize(x: torch.Tensor) -> torch.Tensor:
@@ -238,25 +195,30 @@ def _optimize_adam(
 def main() -> None:
     args = build_parser().parse_args()
 
-    torch.set_num_threads(int(args.num_threads))
-    torch.set_num_interop_threads(int(args.interop_threads))
-    device = torch.device(args.device)
+    # Fixed defaults for Raspberry Pi Zero 2
+    device = torch.device("cpu")
+    torch.set_num_threads(4)
+    torch.set_num_interop_threads(1)
 
-    content_conv = int(args.content_conv)
-    style_convs = _parse_int_list(args.style_convs) or [1, 2, 3, 4, 5]
-    max_conv = int(args.max_conv)
-    if max_conv < max([content_conv] + style_convs):
-        raise SystemExit("--max-conv must be >= max(content_conv, style_convs)")
+    channels_last = True
+    max_conv = 5
+    content_conv = 4
+    style_convs = [1, 2, 3, 4, 5]
 
-    run_dir = Path(args.run_dir) if args.run_dir else None
-    if run_dir is not None:
-        run_dir.mkdir(parents=True, exist_ok=True)
+    # Fast-ish defaults with good quality on Pi
+    pyramid = [128, 256]
+    steps_per_stage = [80, 30]
+    lr_per_stage = [0.04, 0.02]
+    style_weight = 100000.0
+    content_weight = 1.0
+    tv_weight = 0.0
+    init_mode = "content"
+    print_every = 25
+    save_every = 0
+    run_dir = None
 
-    vgg = _build_vgg(args.vgg_weights, max_conv=max_conv, device=device, channels_last=bool(args.channels_last))
-
-    pyramid = _parse_pyramid(args.pyramid, args.imsize)
-    steps_per_stage = _expand_per_stage_int(_parse_int_list(args.steps_per_stage), len(pyramid), int(args.steps))
-    lr_per_stage = _expand_per_stage_float(_parse_float_list(args.lr_per_stage), len(pyramid), float(args.lr))
+    vgg_weights = _find_vgg_weights()
+    vgg = _build_vgg(vgg_weights, max_conv=max_conv, device=device, channels_last=channels_last)
 
     prev_out: Optional[torch.Tensor] = None
     total_t0 = time.time()
@@ -268,7 +230,7 @@ def main() -> None:
         content_img = _load_image(args.content, size, device=device)
         style_img = _load_image(args.style, size, device=device)
 
-        if args.channels_last and device.type == "cpu":
+        if channels_last and device.type == "cpu":
             content_img = content_img.contiguous(memory_format=torch.channels_last)
             style_img = style_img.contiguous(memory_format=torch.channels_last)
 
@@ -281,7 +243,7 @@ def main() -> None:
         )
 
         if prev_out is None:
-            if args.init == "noise":
+            if init_mode == "noise":
                 init_img = torch.rand_like(content_img)
             else:
                 init_img = content_img.clone()
@@ -297,11 +259,11 @@ def main() -> None:
             style_convs=style_convs,
             steps=stage_steps,
             lr=stage_lr,
-            style_weight=float(args.style_weight),
-            content_weight=float(args.content_weight),
-            tv_weight=float(args.tv_weight),
-            print_every=int(args.print_every),
-            save_every=int(args.save_every),
+            style_weight=style_weight,
+            content_weight=content_weight,
+            tv_weight=tv_weight,
+            print_every=print_every,
+            save_every=save_every,
             run_dir=run_dir,
         )
 

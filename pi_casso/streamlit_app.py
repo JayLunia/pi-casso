@@ -236,53 +236,32 @@ def _run_adam(
 def main() -> None:
     st.set_page_config(page_title="Pi-casso (Camera NST)", layout="wide")
     st.title("Pi-casso — Neural Style Transfer on Raspberry Pi (No Training)")
-    st.caption("Optimization-based NST (per-run). Uses a truncated VGG19 feature slice to fit in low RAM.")
+    st.caption("Content + style → output. Minimal UI for Raspberry Pi.")
 
     styles = _list_style_presets()
 
-    with st.sidebar:
-        st.header("Runtime")
-        device_str = st.selectbox("Device", options=["cpu"], index=0)
-        preset = st.selectbox("Quality preset", options=["Fast (Pi)", "Balanced", "High", "Custom"], index=1)
-        if preset == "Fast (Pi)":
-            imsize_default, steps_default, lr_default = 192, 120, 0.04
-            pyramid_default, steps_stage_default, lr_stage_default = "128,192", "60,60", "0.05,0.03"
-        elif preset == "Balanced":
-            imsize_default, steps_default, lr_default = 256, 160, 0.03
-            pyramid_default, steps_stage_default, lr_stage_default = "128,256", "80,30", "0.04,0.02"
-        elif preset == "High":
-            imsize_default, steps_default, lr_default = 256, 250, 0.03
-            pyramid_default, steps_stage_default, lr_stage_default = "", "", ""
-        else:
-            imsize_default, steps_default, lr_default = 256, 200, 0.03
-            pyramid_default, steps_stage_default, lr_stage_default = "", "", ""
+    # Fixed defaults (keep UI minimal)
+    device_str = "cpu"
+    device = torch.device(device_str)
+    _configure_torch_threads(4, 1)
+    channels_last = True
+    content_conv = 4
+    style_convs = [1, 2, 3, 4, 5]
+    pyramid_sizes = [128, 256]
+    stage_steps = [80, 30]
+    stage_lrs = [0.04, 0.02]
+    style_weight = 100000.0
+    content_weight = 1.0
+    tv_weight = 0.0
+    init_mode = "content"
+    preview_every = 0
 
-        imsize = st.slider("Image size", min_value=64, max_value=512, value=int(imsize_default), step=64)
-        steps = st.slider("Steps (Adam)", min_value=10, max_value=600, value=int(steps_default), step=10)
-        lr = st.number_input("Learning rate", min_value=1e-4, max_value=0.5, value=float(lr_default), step=0.01, format="%.4f")
-        st.caption("Optional multi-scale (often better quality/faster on Pi). Leave blank to disable.")
-        pyramid = st.text_input("Pyramid sizes (e.g. 128,256)", value=pyramid_default)
-        steps_per_stage = st.text_input("Steps per stage (e.g. 80,30)", value=steps_stage_default)
-        lr_per_stage = st.text_input("LR per stage (e.g. 0.04,0.02)", value=lr_stage_default)
-
-        style_weight = st.number_input("Style weight", min_value=1.0, value=100000.0, step=1000.0, format="%.0f")
-        content_weight = st.number_input("Content weight", min_value=0.0, value=1.0, step=0.1, format="%.3f")
-        tv_weight = st.number_input("TV weight (optional)", min_value=0.0, value=0.0, step=0.001, format="%.4f")
-        preview_every = st.select_slider("Preview every N steps", options=[0, 5, 10, 25, 50], value=25)
-        init_mode = st.selectbox("Init", options=["content", "noise"], index=0)
-        channels_last = st.checkbox("channels_last", value=True)
-        num_threads = st.number_input("torch threads", min_value=1, max_value=8, value=4, step=1)
-        interop_threads = st.number_input("interop threads", min_value=1, max_value=4, value=1, step=1)
-
-        st.divider()
-        st.header("VGG Slice Weights")
-        st.caption("Generate once on a dev machine, then copy to the Pi (or upload here).")
-        vgg_default = str((_repo_root() / "vgg19_conv1_to_conv5.pth"))
-        vgg_path = st.text_input(
-            "vgg weights path (.pth)",
-            value=str(st.session_state.get(_VGG_WEIGHTS_STATE_KEY, vgg_default)),
-        )
-        vgg_upload = st.file_uploader("…or upload vgg weights (.pth)", type=["pth"])
+    # Auto-detect weights file in repo root; allow upload only if missing
+    vgg_default = str((_repo_root() / "vgg19_conv1_to_conv5.pth"))
+    vgg_path = str(st.session_state.get(_VGG_WEIGHTS_STATE_KEY, vgg_default))
+    if not Path(vgg_path).exists():
+        st.warning("Missing `vgg19_conv1_to_conv5.pth` in repo root. Upload it to run.")
+        vgg_upload = st.file_uploader("Upload `vgg19_conv1_to_conv5.pth`", type=["pth"])
         if vgg_upload is not None:
             tmp_dir = _repo_root() / ".streamlit_tmp"
             tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -291,11 +270,7 @@ def main() -> None:
             st.session_state[_VGG_WEIGHTS_STATE_KEY] = str(tmp_path)
             vgg_path = str(tmp_path)
 
-        st.caption("Create weights: `python3 -m pi_casso.export_vgg19_features_weights --max-conv 5 --out vgg19_conv1_to_conv5.pth`")
-        run_button = st.button("Run", type="primary")
-
-    _configure_torch_threads(int(num_threads), int(interop_threads))
-    device = torch.device(device_str)
+    run_number = st.number_input("Run number", min_value=1, value=1, step=1)
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -318,8 +293,7 @@ def main() -> None:
     with col3:
         st.subheader("Output")
         out_placeholder = st.empty()
-        dl_placeholder = st.empty()
-        metrics_placeholder = st.empty()
+        run_button = st.button("Run", type="primary")
 
     if not run_button:
         return
@@ -339,15 +313,6 @@ def main() -> None:
         original_content = Image.open(io.BytesIO(content_bytes)).convert("RGB")
         original_style = Image.open(style_path).convert("RGB")
 
-    try:
-        pyramid_sizes = _parse_int_list(pyramid) if pyramid.strip() else [int(imsize)]
-        pyramid_sizes = [s for s in pyramid_sizes if s > 0] or [int(imsize)]
-        stage_steps = _expand_int(_parse_int_list(steps_per_stage), len(pyramid_sizes), int(steps))
-        stage_lrs = _expand_float(_parse_float_list(lr_per_stage), len(pyramid_sizes), float(lr))
-    except Exception as e:
-        st.error(f"Invalid pyramid/stage settings: {e}")
-        return
-
     with st.spinner("Loading VGG slice…"):
         vgg = _load_vgg(vgg_path, max_conv=5, device_str=device_str, channels_last=channels_last)
 
@@ -355,7 +320,6 @@ def main() -> None:
     metrics: Dict[str, float] = {}
     with st.spinner("Optimizing…"):
         for stage_idx, size in enumerate(pyramid_sizes, start=1):
-            st.info(f"Stage {stage_idx}/{len(pyramid_sizes)}: {size}px  steps={stage_steps[stage_idx-1]}  lr={stage_lrs[stage_idx-1]}")
             content_pil = original_content.resize((size, size), resample=Image.BICUBIC)
             style_pil = original_style.resize((size, size), resample=Image.BICUBIC)
             content = _pil_to_tensor(content_pil, device=device)
@@ -395,11 +359,10 @@ def main() -> None:
 
     out_img = _tensor_to_pil(out)
     out_placeholder.image(out_img, caption="Final output", use_container_width=True)
-    metrics_placeholder.json(metrics)
-
-    buf = io.BytesIO()
-    out_img.save(buf, format="JPEG")
-    dl_placeholder.download_button("Download output", data=buf.getvalue(), file_name="stylized.jpg", mime="image/jpeg")
+    out_path = _repo_root() / "outputs" / f"run_{int(run_number):04d}.jpg"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_img.save(out_path)
+    st.caption(f"Saved: {out_path}")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ The exported weights file is ~2 MB for `conv_1..conv_5`.
 
 ## Folder Layout
 
-- `pi_casso/run_opt.py` — CLI NST runner (single style)
+- `pi_casso/run_opt.py` — CLI NST runner (single style, minimal args)
 - `pi_casso/streamlit_app.py` — Streamlit UI (camera + preset styles)
 - `pi_casso/export_vgg19_features_weights.py` — export the VGG slice weights (run on your dev machine)
 - `styles/` — put your preset style images here (jpg/png)
@@ -67,21 +67,12 @@ styles/
 
 ```bash
 python3 -m pi_casso.run_opt \
-  --vgg-weights vgg19_conv1_to_conv5.pth \
   --content path/to/content.jpg \
   --style styles/your_style.jpg \
-  --out outputs/out.jpg \
-  --imsize 256 \
-  --steps 200 \
-  --num-threads 4 \
-  --interop-threads 1 \
-  --channels-last
+  --out outputs/out.jpg
 ```
 
-Quality/speed tips:
-- Big speedups: lower `--imsize` to `128` or `192`
-- Better quality for similar time: use multi-scale, e.g. `--pyramid 128,256 --steps-per-stage 80,30 --lr-per-stage 0.04,0.02`
-- If results look noisy: try `--init content` (default) and lower `--lr` (e.g. `0.02`)
+Defaults are tuned for Pi (multi-scale 128→256). The CLI automatically looks for `vgg19_conv1_to_conv5.pth` in the repo root (or `PI_CASSO_VGG_WEIGHTS`).
 
 ## Run (Streamlit UI)
 
@@ -100,8 +91,8 @@ streamlit run pi_casso/streamlit_app.py --server.address 0.0.0.0 --server.port 8
 The UI:
 - captures content via `camera_input` (or file upload fallback)
 - lets you pick a style from `styles/`
-- runs NST and shows previews + final image + download button
-- includes a “Quality preset” and optional multi-scale pyramid controls to reduce runtime on Pi
+- runs NST and shows only the final output image
+- asks for a run number and saves to `outputs/run_XXXX.jpg`
 
 ## Troubleshooting
 
