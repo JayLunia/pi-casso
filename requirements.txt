@@ -1,0 +1,4 @@
+numpy>=1.23.0
+Pillow>=10.0.0
+# torch is intentionally NOT pinned here; install a wheel compatible with your Pi OS/arch
+
