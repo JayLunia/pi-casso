@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -10,6 +11,10 @@ import streamlit as st
 import torch
 import torch.nn.functional as F
 from PIL import Image
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from pi_casso.vgg19_features import build_vgg19_features_until_conv, extract_conv_features
 
@@ -270,4 +275,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
