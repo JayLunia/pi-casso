@@ -220,7 +220,7 @@ def _run_adam(
 
         prog.progress(step / steps, text=f"Optimizing… {step}/{steps}")
         if preview_every > 0 and (step == 1 or step % preview_every == 0 or step == steps):
-            preview_placeholder.image(_tensor_to_pil(x), caption=f"Preview step {step}", use_container_width=True)
+            preview_placeholder.image(_tensor_to_pil(x), caption=f"Preview step {step}", width="stretch")
 
         last = {
             "content": float(c_loss.detach().cpu()),
@@ -290,7 +290,7 @@ def main() -> None:
             labels = [p.name for p in styles]
             chosen = st.selectbox("Choose style", options=labels, index=0)
             style_path = styles[labels.index(chosen)]
-            st.image(str(style_path), caption=str(style_path), use_container_width=True)
+            st.image(str(style_path), caption=str(style_path), width="stretch")
 
     with col3:
         st.subheader("Output")
@@ -360,7 +360,7 @@ def main() -> None:
     out = prev_out
 
     out_img = _tensor_to_pil(out)
-    out_placeholder.image(out_img, caption="Final output", use_container_width=True)
+    out_placeholder.image(out_img, caption="Final output", width="stretch")
     out_path = _repo_root() / "outputs" / f"run_{int(run_number):04d}.jpg"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_img.save(out_path)
