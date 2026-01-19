@@ -23,6 +23,7 @@ VGG_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1
 VGG_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
 
 _TORCH_THREADS_STATE_KEY = "_pi_casso_torch_threads"
+_VGG_WEIGHTS_STATE_KEY = "_pi_casso_vgg_weights_path"
 
 
 def _configure_torch_threads(num_threads: int, interop_threads: int) -> None:
@@ -213,9 +214,22 @@ def main() -> None:
 
         st.divider()
         st.header("VGG Slice Weights")
-        st.caption("Generate once on a dev machine, then copy to the Pi.")
+        st.caption("Generate once on a dev machine, then copy to the Pi (or upload here).")
         vgg_default = str((_repo_root() / "vgg19_conv1_to_conv5.pth"))
-        vgg_path = st.text_input("vgg weights path (.pth)", value=vgg_default)
+        vgg_path = st.text_input(
+            "vgg weights path (.pth)",
+            value=str(st.session_state.get(_VGG_WEIGHTS_STATE_KEY, vgg_default)),
+        )
+        vgg_upload = st.file_uploader("…or upload vgg weights (.pth)", type=["pth"])
+        if vgg_upload is not None:
+            tmp_dir = _repo_root() / ".streamlit_tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path = tmp_dir / "vgg19_conv1_to_conv5.pth"
+            tmp_path.write_bytes(vgg_upload.getvalue())
+            st.session_state[_VGG_WEIGHTS_STATE_KEY] = str(tmp_path)
+            vgg_path = str(tmp_path)
+
+        st.caption("Create weights: `python3 -m pi_casso.export_vgg19_features_weights --max-conv 5 --out vgg19_conv1_to_conv5.pth`")
         run_button = st.button("Run", type="primary")
 
     _configure_torch_threads(int(num_threads), int(interop_threads))
