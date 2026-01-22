@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+import inspect
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -9,7 +12,8 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageOps
+
 
 from pi_casso.vgg19_features import build_vgg19_features_until_conv, extract_conv_features
 
@@ -29,6 +33,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--content", type=str, required=True, help="Path to content image.")
     p.add_argument("--style", type=str, required=True, help="Path to style image (single style).")
     p.add_argument("--out", type=str, required=True, help="Output image path.")
+    p.add_argument(
+        "--inky",
+        action="store_true",
+        help="Display the final result on a Pimoroni Inky e-ink display (if available).",
+    )
+    p.add_argument(
+        "--inky-type",
+        type=str,
+        default="",
+        help="Force a specific Inky type if auto-detect fails (eg: phat, what, impressions).",
+    )
+    p.add_argument(
+        "--inky-colour",
+        type=str,
+        default="black",
+        choices=["black", "red", "yellow"],
+        help="Inky colour for mono/tri-colour displays (eg: black, red, yellow).",
+    )
+    p.add_argument(
+        "--inky-border",
+        type=str,
+        default="white",
+        choices=["white", "black", "red", "yellow"],
+        help="Inky border colour (white/black/red/yellow).",
+    )
+    p.add_argument(
+        "--inky-rotate",
+        type=int,
+        default=0,
+        help="Rotate clockwise degrees before display (0/90/180/270).",
+    )
+    p.add_argument(
+        "--inky-saturation",
+        type=float,
+        default=0.5,
+        help="Saturation for colour Inky displays (only if supported by the driver).",
+    )
     return p
 
 
@@ -53,6 +94,118 @@ def _parse_pyramid(arg: str, fallback: int) -> List[int]:
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def _import_inky_package() -> None:
+    """
+    Try to make `import inky` resolve to the Pimoroni Inky Python package.
+
+    This repo vendors Pimoroni's inky library under `./inky/inky/`. When running from the repo
+    root, `import inky` can otherwise resolve to a namespace package (`./inky/`) which breaks
+    imports like `inky.auto`.
+    """
+
+    try:
+        importlib.import_module("inky.auto")
+        return
+    except Exception:
+        pass
+
+    vendor_root = _repo_root() / "inky"
+    if vendor_root.exists():
+        vendor_root_s = str(vendor_root)
+        if vendor_root_s not in sys.path:
+            sys.path.insert(0, vendor_root_s)
+        sys.modules.pop("inky", None)
+        sys.modules.pop("inky.auto", None)
+
+
+def _init_inky_display(inky_type: str, inky_colour: str):
+    _import_inky_package()
+
+    if inky_type:
+        t = inky_type.strip().lower()
+        c = inky_colour.strip().lower()
+        if t == "phat":
+            from inky.phat import InkyPHAT
+
+            return InkyPHAT(c)
+        if t == "what":
+            from inky.what import InkyWHAT
+
+            return InkyWHAT(c)
+        if t in {"impressions", "impression", "7colour", "uc8159"}:
+            from inky.inky_uc8159 import Inky as InkyUC8159
+
+            return InkyUC8159()
+        raise ValueError(f"Unsupported --inky-type: {inky_type!r}")
+
+    from inky.auto import auto
+
+    return auto()
+
+
+def _tensor_to_pil(t: torch.Tensor) -> Image.Image:
+    try:
+        import numpy as np  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("numpy is required (install from requirements.txt)") from e
+
+    t = t.detach().cpu().clamp(0, 1)[0]
+    arr = (t.permute(1, 2, 0).contiguous().numpy() * 255.0 + 0.5).astype(np.uint8)
+    return Image.fromarray(arr, mode="RGB")
+
+
+def _show_on_inky(
+    img: Image.Image,
+    *,
+    inky_type: str,
+    inky_colour: str,
+    border: str,
+    rotate_clockwise: int,
+    saturation: float,
+) -> None:
+    try:
+        display = _init_inky_display(inky_type=inky_type, inky_colour=inky_colour)
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "Failed to initialise Inky display. If you're running on a Raspberry Pi, make sure the "
+            "Pimoroni Inky library and its system deps are installed (see https://github.com/pimoroni/inky)."
+        ) from e
+
+    if hasattr(display, "resolution"):
+        width, height = display.resolution
+    else:
+        width, height = int(display.width), int(display.height)
+
+    img = ImageOps.fit(img.convert("RGB"), (width, height), method=Image.BICUBIC, centering=(0.5, 0.5))
+    rot = int(rotate_clockwise) % 360
+    if rot:
+        img = img.rotate(-rot, expand=False)
+
+    if hasattr(display, "set_border"):
+        border_name = border.strip().upper()
+        border_value = getattr(display, border_name, None)
+        if border_value is not None:
+            display.set_border(border_value)
+
+    set_image = getattr(display, "set_image", None)
+    if set_image is None:
+        raise RuntimeError("Inky display driver does not provide set_image().")
+
+    try:
+        sig = inspect.signature(set_image)
+        if "saturation" in sig.parameters:
+            set_image(img, saturation=float(saturation))
+        else:
+            set_image(img)
+    except TypeError:
+        set_image(img)
+
+    show = getattr(display, "show", None)
+    if show is None:
+        raise RuntimeError("Inky display driver does not provide show().")
+    show()
 
 
 def _find_vgg_weights() -> Path:
@@ -273,6 +426,16 @@ def main() -> None:
     dt = round(time.time() - total_t0, 2)
     print(f"Saved: {args.out}")
     print(f"Total time: {dt}s")
+    if args.inky:
+        _show_on_inky(
+            _tensor_to_pil(prev_out),
+            inky_type=str(args.inky_type),
+            inky_colour=str(args.inky_colour),
+            border=str(args.inky_border),
+            rotate_clockwise=int(args.inky_rotate),
+            saturation=float(args.inky_saturation),
+        )
+        print("Displayed on Inky.")
 
 
 if __name__ == "__main__":
